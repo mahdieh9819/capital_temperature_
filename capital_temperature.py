@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Print the current temperature for a country's capital city.
-
-Uses the free Open-Meteo geocoding and weather APIs. No API key or third-party
-Python packages are required.
-"""
+"""Print a capital's temperature plus country oil and gas reserve figures."""
 
 from __future__ import annotations
 
@@ -44,7 +40,6 @@ def find_capital(country: str) -> str:
     normalized = country.strip().casefold()
     if normalized in CAPITALS:
         return CAPITALS[normalized]
-
     try:
         data = get_json(f"https://restcountries.com/v3.1/name/{country}", {"fullText": "true", "fields": "capital,name"})
         return data[0]["capital"][0]
@@ -66,13 +61,12 @@ def current_temperature(city: str) -> tuple[float, str]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Get the current temperature in a country's capital.")
+    parser = argparse.ArgumentParser(description="Get a capital temperature and country oil/gas reserves.")
     parser.add_argument("country", nargs="?", help="Country name, for example: Iran")
     args = parser.parse_args()
     country = args.country or input("Country: ").strip()
     if not country:
         parser.error("Please provide a country name.")
-
     try:
         capital = find_capital(country)
         temperature, observed_at = current_temperature(capital)
@@ -80,7 +74,70 @@ def main() -> None:
         print(f"Error: {error}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"{capital}, capital of {country.title()}: {temperature:.1f} °C (observed {observed_at} local time)")
+    print(f"{capital}, capital of {country.title()}: {temperature:.1f} degrees C (observed {observed_at} local time)")
+    print(format_reserves(country))
+
+
+# ---------------------------------------------------------------------------
+# Oil and gas reserves output (added after the original temperature code)
+# ---------------------------------------------------------------------------
+# These datasets contain country-level *proved reserves*, rather than an
+# estimate of all undiscovered resources. Values are downloaded at runtime.
+import csv
+from io import StringIO
+
+OIL_RESERVES_URL = "https://ourworldindata.org/grapher/oil-proved-reserves.csv?v=1&csvType=full&useColumnShortNames=false"
+GAS_RESERVES_URL = "https://ourworldindata.org/grapher/natural-gas-proved-reserves.csv?v=1&csvType=full&useColumnShortNames=false"
+
+RESOURCE_COUNTRY_NAMES = {
+    "uk": "United Kingdom", "usa": "United States",
+    "united states of america": "United States",
+}
+
+
+def get_csv(url: str) -> list[dict[str, str]]:
+    """Download an OWID CSV dataset without external Python packages."""
+    request = Request(url, headers={"User-Agent": "capital-temperature-model/1.0"})
+    try:
+        with urlopen(request, timeout=20) as response:
+            return list(csv.DictReader(StringIO(response.read().decode("utf-8"))))
+    except (HTTPError, URLError, TimeoutError) as error:
+        raise RuntimeError("Could not contact the oil and gas data service.") from error
+
+
+def latest_reserve(rows: list[dict[str, str]], country: str) -> tuple[float, int] | None:
+    """Find a country's newest non-empty reserve value in an OWID CSV."""
+    country_rows = [row for row in rows if row["Entity"].casefold() == country.casefold()]
+    if not country_rows:
+        return None
+    value_column = next(name for name in country_rows[0] if name not in {"Entity", "Code", "Year"})
+    valid_rows = [row for row in country_rows if row.get(value_column)]
+    if not valid_rows:
+        return None
+    latest = max(valid_rows, key=lambda row: int(row["Year"]))
+    return float(latest[value_column]), int(latest["Year"])
+
+
+def format_reserves(country: str) -> str:
+    """Return latest available oil and natural-gas proved reserve figures."""
+    dataset_country = RESOURCE_COUNTRY_NAMES.get(country.strip().casefold(), country.strip())
+    try:
+        oil = latest_reserve(get_csv(OIL_RESERVES_URL), dataset_country)
+        gas = latest_reserve(get_csv(GAS_RESERVES_URL), dataset_country)
+    except RuntimeError as error:
+        return f"Oil and gas proved reserves: unavailable ({error})"
+
+    def display(record: tuple[float, int] | None, unit: str) -> str:
+        if record is None:
+            return "no country value available"
+        value, year = record
+        return f"{value:,.0f} {unit} ({year})"
+
+    return (
+        "Proved reserves (latest available data):\n"
+        f"  Oil: {display(oil, 'tonnes')}\n"
+        f"  Natural gas: {display(gas, 'cubic metres')}"
+    )
 
 
 if __name__ == "__main__":
